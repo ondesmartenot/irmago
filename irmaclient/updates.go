@@ -2,6 +2,7 @@ package irmaclient
 
 import (
 	"encoding/json"
+	"github.com/privacybydesign/gabi"
 	"time"
 
 	irma "github.com/privacybydesign/irmago"
@@ -49,7 +50,7 @@ var clientUpdates = []func(client *Client) error{
 		}
 
 		// Open one bolt transaction to process all our log entries in
-		err = client.storage.Transaction(func(tx *transaction) error {
+		err = client.storageOld.Transaction(func(tx *transaction) error {
 			for _, log := range logs {
 				// As log.Request is a json.RawMessage it would not get updated to the new session request
 				// format by re-marshaling the containing struct, as normal struct members would,
@@ -62,7 +63,7 @@ var clientUpdates = []func(client *Client) error{
 				if err != nil {
 					return err
 				}
-				if err = client.storage.TxAddLogEntry(tx, log); err != nil {
+				if err = client.storageOld.TxAddLogEntry(tx, log); err != nil {
 					return err
 				}
 			}
@@ -121,29 +122,64 @@ var clientUpdates = []func(client *Client) error{
 			return err
 		}
 
-		return client.storage.Transaction(func(tx *transaction) error {
-			if err = client.storage.TxStoreSecretKey(tx, sk); err != nil {
+		return client.storageOld.Transaction(func(tx *transaction) error {
+			if err = client.storageOld.TxStoreSecretKey(tx, sk); err != nil {
 				return err
 			}
 			for credTypeID, attrslistlist := range attrs {
-				if err = client.storage.TxStoreAttributes(tx, credTypeID, attrslistlist); err != nil {
+				if err = client.storageOld.TxStoreAttributes(tx, credTypeID, attrslistlist); err != nil {
 					return err
 				}
 			}
 			for hash, sig := range sigs {
-				err = client.storage.TxStoreCLSignature(tx, hash, sig)
+				err = client.storageOld.TxStoreCLSignature(tx, hash, sig)
 				if err != nil {
 					return err
 				}
 			}
-			if err = client.storage.TxStoreKeyshareServers(tx, ksses); err != nil {
+			if err = client.storageOld.TxStoreKeyshareServers(tx, ksses); err != nil {
 				return err
 			}
-			if err = client.storage.TxStorePreferences(tx, prefs); err != nil {
+			if err = client.storageOld.TxStorePreferences(tx, prefs); err != nil {
 				return err
 			}
-			return client.storage.TxStoreUpdates(tx, updates)
+			return client.storageOld.TxStoreUpdates(tx, updates)
 		})
+	},
+
+	// TODO: WIP, handle errors correctly!
+	// 9: Encrypt storage
+	func(client *Client) error {
+		a, err := client.storageOld.LoadSecretKey()
+		client.storage.StoreSecretKey(a)
+
+		b, err := client.storageOld.LoadUpdates()
+		client.storage.StoreUpdates(b)
+
+		c, err := client.storageOld.LoadPreferences()
+		client.storage.StorePreferences(c)
+
+		f, err := client.storageOld.LoadKeyshareServers()
+		client.storage.StoreKeyshareServers(f)
+
+		d, err := client.storageOld.LoadAttributes()
+		for i := range d {
+			client.storage.StoreAttributes(i, d[i])
+
+			for attr := range d[i] {
+				// TODO: handle error!
+				e, h, _ := client.storageOld.LoadSignature(d[i][attr])
+
+				cred := &credential{attrs: d[i][attr], Credential: &gabi.Credential{Signature: e, NonRevocationWitness: h}}
+				client.storage.StoreSignature(cred)
+			}
+		}
+
+		if err != nil {
+			return err
+		}
+
+		return client.storageOld.DeleteAll()
 	},
 
 	// TODO: Maybe delete preferences file to start afresh
@@ -161,8 +197,14 @@ func (client *Client) update() error {
 	// When no updates are found, it can either be a fresh storage or the storage has not been updated
 	// to bbolt yet. Therefore also check the updates file.
 	if len(client.updates) == 0 {
-		if client.updates, err = client.fileStorage.LoadUpdates(); err != nil {
+		// TODO: WIP
+		if client.updates, err = client.storageOld.LoadUpdates(); err != nil {
 			return err
+		}
+		if len(client.updates) == 0 {
+			if client.updates, err = client.fileStorage.LoadUpdates(); err != nil {
+				return err
+			}
 		}
 	}
 
